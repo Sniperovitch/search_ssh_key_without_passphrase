@@ -1,0 +1,130 @@
+#!/bin/bash
+
+declare -r RC_TRUE=0
+declare -r RC_FALSE=1
+
+declare -r VERBOSE=0
+declare -r DEBUG=0
+declare -r CLEANUP_VERBOSE=0
+
+# helps to speedup keys search
+declare -r KEY_SIZE_UPPER_LIMIT=16k
+declare -r KEY_SIZE_LOWER_LIMIT=128
+
+declare -r BROWSE_ROOT=/home
+
+function verbose() {
+  if test -n "$VERBOSE";
+  then
+    if test "$VERBOSE" -ne 0;
+    then
+      echo "$@"
+    fi
+  fi
+}
+
+function debug() {
+  if test -n "$DEBUG";
+  then
+    if test "$DEBUG" -ne 0;
+    then
+      echo "$@" >&2
+    fi
+  fi
+}
+
+function cleanup {
+  test "$CLEANUP_VERBOSE" -ne 0 && echo "cleanup() starts"
+  for filename in "${scratchpad[@]}"
+  do
+    if test "$CLEANUP_VERBOSE" -ne 1;
+    then
+      # Without VERBOSE, quick, simple, quiet
+      test -f "$filename" && rm -f "$filename"
+    else
+      # VERBOSE CLEANUP
+      echo -e "\n"
+      echo "'$filename' in scratchpad"
+      if test -f "$filename";
+      then
+        echo "'$filename' still exists on disk"
+        rm -f "$filename" >/dev/null 2>&1
+        if test "$?" -eq 0;
+        then
+          echo "'$filename' deleted"
+        else
+          echo "'$filename' not deleted"
+        fi
+      fi
+    fi
+  done
+  test "$CLEANUP_VERBOSE" -ne 0 && echo "cleanup() ends"
+}
+trap cleanup EXIT INT TERM
+
+
+function newtemp {
+  local tempfile=$(mktemp)
+  scratchpad+=($tempfile)
+  eval "$1=$tempfile"
+  debug "'$tempfile' added to scratchpad at index $((${#scratchpad[@]}-1))"
+}
+
+function is_ssh_keyfile {
+  local filename=$1
+  if test -s "$filename";
+  then
+    head -n1 "$filename" | grep 'BEGIN' | grep 'PRIVATE KEY' >/dev/null && tail -n1 "$filename" | grep 'END' | grep 'PRIVATE KEY' >/dev/null
+    if test "$?" -eq 0;
+    then
+      verbose "$filename is a private key"
+      return $RC_TRUE
+    fi
+  fi
+
+  return $RC_FALSE
+}
+
+function is_unsecure_sshkey {
+  local filename=$1
+  if test -s "$filename";
+  then
+    echo "" | ssh-keygen -y -f "$filename" >/dev/null 2>&1
+    if test "$?" -eq 0;
+    then
+      verbose "$filename is an unsecure key"
+      return $RC_TRUE
+    fi
+  fi
+
+  return $RC_FALSE
+}
+
+newtemp list_filenames
+newtemp file_emptykey
+
+verbose "Looking for files with size between $KEY_SIZE_LOWER_LIMIT and $KEY_SIZE_UPPER_LIMIT in $BROWSE_ROOT"
+verbose "Please wait..."
+find "$BROWSE_ROOT" -type f -size +"$KEY_SIZE_LOWER_LIMIT" -a -size -"$KEY_SIZE_UPPER_LIMIT" >"$list_filenames" 2>/dev/null
+for filename in `cat "$list_filenames"`
+do
+  debug $filename
+  if is_ssh_keyfile "$filename"
+  then
+    if is_unsecure_sshkey "$filename"
+    then
+      echo "$filename" >> "$file_emptykey"
+    fi
+  fi
+done
+
+if test -s "$file_emptykey";
+then
+  echo "ssh keys without passphrase"
+  echo "---------------------------"
+  cat "$file_emptykey"
+  exit 1
+else
+  echo "No ssh keys without passphrase"
+  exit 0
+fi
